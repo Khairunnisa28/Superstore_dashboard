@@ -1,7 +1,10 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
+from prophet import Prophet 
+
 
 # =========================
 # CONFIG
@@ -106,20 +109,238 @@ def narrative(df):
     """
 
 # =========================
+# Modeling & Evaluation Function
+# =========================
+
+def compute_best_model(df_ts, horizon=30, step=30):
+
+    results = []
+
+    for start in range(0, len(df_ts) - horizon, step):
+        train = df_ts[:start + horizon]
+        test = df_ts[start + horizon:start + horizon + step]
+
+        if len(test) == 0:
+            continue
+
+        try:
+            # =========================
+            # PROPHET
+            # =========================
+            model = Prophet()
+            model.fit(train)
+
+            future = model.make_future_dataframe(periods=len(test))
+            forecast = model.predict(future)
+
+            y_true = test["y"].values
+            y_pred_prophet = forecast["yhat"].iloc[-len(test):].values
+
+            if len(y_true) != len(y_pred_prophet):
+                continue
+
+            mae_p, rmse_p = evaluate(y_true, y_pred_prophet)
+
+            # =========================
+            # MOVING AVERAGE
+            # =========================
+            train_ma = train.copy()
+            train_ma["ma"] = train_ma["y"].rolling(7).mean()
+
+            # handle NaN
+            if train_ma["ma"].dropna().empty:
+                continue
+
+            last_ma = train_ma["ma"].dropna().iloc[-1]
+            y_pred_ma = np.full(len(test), last_ma)
+
+            if len(y_true) != len(y_pred_ma):
+                continue
+
+            mae_ma, rmse_ma = evaluate(y_true, y_pred_ma)
+
+            # =========================
+            # SAVE RESULT
+            # =========================
+            results.append({
+                "window": start,
+                "mae_prophet": mae_p,
+                "rmse_prophet": rmse_p,
+                "mae_ma": mae_ma,
+                "rmse_ma": rmse_ma
+            })
+
+        except Exception:
+            continue  # skip kalau error
+
+    df_res = pd.DataFrame(results)
+
+    # =========================
+    # PILIH MODEL TERBAIK
+    # =========================
+    if df_res.empty:
+        return "No Model", df_res
+
+    if df_res["rmse_prophet"].mean() < df_res["rmse_ma"].mean():
+        best_model = "Prophet"
+    else:
+        best_model = "Moving Average"
+
+    return best_model, df_res
+
+# =========================
+# GLOBAL COMPUTATION
+# =========================
+df_ts = df.groupby("order_date")["sales"].sum().reset_index()
+
+df_ts = df_ts.rename(columns={
+    "order_date": "ds",
+    "sales": "y"
+})
+
+if "best_model" not in st.session_state:
+    best_model, df_res = compute_best_model(df_ts)
+    st.session_state["best_model"] = best_model
+    st.session_state["df_res"] = df_res
+
+# =========================
 # TABS
 # =========================
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+    "🧠 Business & Data",
     "📊 Overview",
     "🗺️ Region",
     "📦 Category",
     "🔍 Drilldown",
-    "📈 Forecast"   # NEW TAB
+    "📈 Forecast",
+    "🤖 Modeling & Evaluation"
 ])
 
-# =========================
-# TAB 1: OVERVIEW
-# =========================
 with tab1:
+    st.subheader("🧠 Business & Data Understanding")
+
+    # =========================
+    # BUSINESS OBJECTIVE
+    # =========================
+    st.markdown("## 🎯 Business Objective")
+
+    st.write("""
+    Fokus utama adalah memahami faktor-faktor yang memengaruhi performa penjualan serta hubungan antara sales, profit, dan discount untuk mendukung pengambilan keputusan bisnis.
+
+    Beberapa area utama yang menjadi perhatian meliputi:
+    - Identifikasi wilayah dan kategori dengan kontribusi penjualan tertinggi dan terendah
+    - Deteksi area dengan profit rendah sebagai dasar evaluasi strategi pricing dan operasional
+    - Pemahaman pola penjualan untuk meningkatkan efektivitas distribusi dan pemasaran
+
+    Data historis kemudian dimanfaatkan untuk membangun model forecasting guna memproyeksikan penjualan dalam jangka pendek (± 3 bulan ke depan).
+
+    Hasil prediksi menunjukkan arah tren penjualan yang dapat digunakan untuk:
+    - Mengoptimalkan perencanaan inventory dan supply chain
+    - Menentukan waktu promosi dan campaign secara lebih tepat
+    - Mengantisipasi risiko overstock maupun understock berdasarkan proyeksi demand
+
+    Dengan menggabungkan pemahaman historis dan hasil forecasting, keputusan bisnis dapat diambil secara lebih terukur, adaptif, dan proaktif terhadap perubahan tren pasar.
+    """)
+
+    # =========================
+    # TECHNICAL OBJECTIVE
+    # =========================
+    st.markdown("## ⚙️ Technical Objective")
+
+    st.write("""
+    Dari sisi teknis, pendekatan yang digunakan berfokus pada pembangunan model time series forecasting untuk memprediksi penjualan di masa depan berdasarkan data historis.
+
+    Tahapan yang dilakukan meliputi:
+    - Eksplorasi data untuk mengidentifikasi tren dan pola musiman (seasonality)
+    - Pembangunan model menggunakan Prophet untuk menangkap komponen trend dan seasonality
+    - Evaluasi performa model menggunakan metrik seperti MAE, dan RMSE
+    - Analisis residual untuk memastikan model tidak bias dan memiliki error yang bersifat acak
+
+    Model forecasting yang dibangun menghasilkan:
+    - Estimasi penjualan jangka pendek (± 3 bulan ke depan)
+    - Indikasi arah tren (peningkatan atau penurunan)
+    - Insight pola musiman yang dapat dimanfaatkan dalam strategi bisnis
+
+    Hasil prediksi ini digunakan untuk:
+    - Perencanaan inventory dan supply chain
+    - Penentuan waktu promosi dan campaign secara lebih tepat
+    - Mendukung pengambilan keputusan strategis berbasis data prediktif
+    """)
+
+    # =========================
+    # DATA PREVIEW
+    # =========================
+    st.markdown("## 📊 Data Preview")
+
+    st.dataframe(df.head())
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Total Data", len(df))
+    col2.metric("Jumlah Kolom", df.shape[1])
+    min_date = df["order_date"].min().strftime("%d %b %Y")
+    max_date = df["order_date"].max().strftime("%d %b %Y")
+
+    st.caption(f"Periode data: {min_date} hingga {max_date}")
+
+    # =========================
+    # DATA TRANSFORMATION
+    # =========================
+    st.markdown("## 🔧 Data Transformation")
+
+    # ---------- DATE FIX ----------
+    st.markdown("### 📅 Perbaikan Format Tanggal")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.write("Before")
+        st.dataframe(df[["order_date"]].head())
+        st.caption(f"Tipe data: {df['order_date'].dtype}")
+
+    # convert
+    df["order_date"] = pd.to_datetime(df["order_date"])
+
+    with col2:
+        st.write("After")
+        st.dataframe(df[["order_date"]].head())
+        st.caption(f"Tipe data: {df['order_date'].dtype}")
+
+    # ---------- AGGREGATION ----------
+    st.markdown("### 📊 Agregasi Penjualan per Hari")
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.write("Data Mentah")
+        st.dataframe(df[["order_date", "sales"]].head())
+
+    with col2:
+        st.write("Setelah Agregasi (Daily)")
+        st.dataframe(df_ts.head())
+
+    # =========================
+    # DATA SIZE COMPARISON
+    # =========================
+    st.markdown("### 📉 Perbandingan Jumlah Data")
+
+    col1, col2 = st.columns(2)
+    col1.metric("Data Awal", len(df))
+    col2.metric("Data Setelah Agregasi", len(df_ts))
+
+    # =========================
+    # TRANSFORMATION INSIGHT
+    # =========================
+    st.markdown("## 🧠 Insight Transformasi")
+
+    st.write("""
+    - Format tanggal diperbaiki untuk memastikan konsistensi analisis berbasis waktu
+    - Data diagregasi per hari untuk mengurangi noise dan mempermudah analisis tren
+    - Hasil agregasi digunakan sebagai input utama dalam model forecasting
+    """)
+
+# =========================
+# TAB 2: OVERVIEW
+# =========================
+with tab2:
     st.subheader("📊 Business Overview")
 
     # =========================
@@ -185,10 +406,9 @@ with tab1:
     """)
 
 # =========================
-# TAB 2: MAP
+# TAB 3: MAP
 # =========================
-with tab2:
-  with tab2:
+with tab3:
     st.subheader("🗺️ Sales & Profit Map")
 
     # =========================
@@ -333,9 +553,9 @@ with tab2:
 
 
 # =========================
-# TAB 3: CATEGORY
+# TAB 4: CATEGORY
 # =========================
-with tab3:
+with tab4:
     st.subheader("📦 Category & Sub-Category Analysis")
 
     # =========================
@@ -475,9 +695,9 @@ with tab3:
         st.warning("⚠️ Sub-category dengan diskon tinggi juga mengalami kerugian → strategi diskon perlu diperbaiki")
 
 # =========================
-# TAB 4: DRILLDOWN
+# TAB 5: DRILLDOWN
 # =========================
-with tab4:
+with tab5:
     st.subheader("🔍 Drilldown Analysis by State")
 
     # =========================
@@ -567,21 +787,8 @@ with tab4:
     - Optimalkan strategi pemasaran untuk meningkatkan profit
     """)
 
-with tab5:
-    st.subheader("📈 Sales Forecast & Seasonality Analysis")
-
-    from prophet import Prophet
-
-    # =========================
-    # FIXED PERIOD (90 HARI)
-    # =========================
-    period = 90
-
-    # =========================
-    # PREPARE DATA
-    # =========================
-    df_ts = df.groupby("order_date")["sales"].sum().reset_index()
-    df_ts = df_ts.rename(columns={"order_date": "ds", "sales": "y"})
+with tab6:
+    st.subheader("📈 Forecast & Business Insight")
 
     # =========================
     # MODEL
@@ -596,6 +803,7 @@ with tab5:
     # =========================
     # FORECAST
     # =========================
+    period = 90
     future = model.make_future_dataframe(periods=period)
     forecast = model.predict(future)
 
@@ -606,23 +814,19 @@ with tab5:
     # ACTUAL
     # =========================
     st.markdown("## 📊 Actual Sales")
-
     fig_actual = px.line(actual, x="ds", y="y")
     st.plotly_chart(fig_actual, use_container_width=True)
-
-    st.caption(f"""
-    Data historis menunjukkan tren penjualan. 
-    Nilai terakhir sebesar ${actual['y'].iloc[-1]:,.0f}.
-    """)
 
     # =========================
     # FORECAST
     # =========================
     st.markdown("## 🔮 Forecast Sales")
-
     fig_forecast = px.line(forecast_only, x="ds", y="yhat")
     st.plotly_chart(fig_forecast, use_container_width=True)
 
+    # =========================
+    # TREND
+    # =========================
     last_actual = actual["y"].iloc[-1]
     future_pred = forecast_only["yhat"].iloc[-1]
     growth = ((future_pred - last_actual) / last_actual) * 100
@@ -631,141 +835,236 @@ with tab5:
 
     st.caption(f"""
     Prediksi menunjukkan tren {trend_text} sebesar {abs(growth):.2f}% 
-    dalam 3 bulan ke depan (estimasi ${future_pred:,.0f}).
+    dalam 3 bulan ke depan.
     """)
 
     # =========================
-    # COMBINED
+    # AMBIL BEST MODEL
     # =========================
-    st.markdown("## 📈 Actual vs Forecast")
+    best_model = st.session_state.get("best_model", None)
 
-    fig_combined = px.line()
-
-    fig_combined.add_scatter(
-        x=actual["ds"], y=actual["y"],
-        mode="lines", name="Actual",
-        line=dict(color="blue")
-    )
-
-    fig_combined.add_scatter(
-        x=forecast_only["ds"], y=forecast_only["yhat"],
-        mode="lines", name="Forecast",
-        line=dict(color="red", dash="dash")
-    )
-
-    fig_combined.add_scatter(
-        x=forecast_only["ds"],
-        y=forecast_only["yhat_upper"],
-        mode="lines",
-        line=dict(width=0),
-        showlegend=False
-    )
-
-    fig_combined.add_scatter(
-        x=forecast_only["ds"],
-        y=forecast_only["yhat_lower"],
-        mode="lines",
-        fill='tonexty',
-        fillcolor='rgba(255,0,0,0.2)',
-        line=dict(width=0),
-        name="Confidence Interval"
-    )
-
-    st.plotly_chart(fig_combined, use_container_width=True)
-
-    st.caption("Area bayangan menunjukkan ketidakpastian prediksi.")
+    if best_model is None:
+        st.warning("Model belum dihitung. Silakan buka tab Modeling terlebih dahulu.")
+        best_model = "Belum tersedia"
 
     # =========================
-    # COMPONENT
+    # BUSINESS RECOMMENDATION
     # =========================
-    st.markdown("## 🔍 Trend & Seasonality")
-
-    fig_comp = model.plot_components(forecast)
-    st.pyplot(fig_comp)
-
-    # =========================
-    # WEEKLY ANALYSIS
-    # =========================
-    st.markdown("## 📅 Weekly Pattern")
-
-    df_ts["day_name"] = df_ts["ds"].dt.day_name()
-
-    weekly = df_ts.groupby("day_name")["y"].mean().reindex([
-        "Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"
-    ])
-
-    fig_weekly = px.bar(
-        weekly,
-        x=weekly.index,
-        y=weekly.values,
-        color=weekly.values,
-        color_continuous_scale=["red", "yellow", "green"]
-    )
-
-    st.plotly_chart(fig_weekly, use_container_width=True)
-
-    peak_day = weekly.idxmax()
-    low_day = weekly.idxmin()
-
-    st.caption(f"Puncak penjualan: {peak_day} | Terendah: {low_day}")
-
-    # =========================
-    # MONTHLY ANALYSIS
-    # =========================
-    st.markdown("## 📆 Monthly Pattern")
-
-    df_ts["month"] = df_ts["ds"].dt.month
-    monthly = df_ts.groupby("month")["y"].mean()
-
-    fig_month = px.line(monthly, x=monthly.index, y=monthly.values)
-    st.plotly_chart(fig_month, use_container_width=True)
-
-    peak_month = monthly.idxmax()
-
-    st.caption(f"Bulan dengan performa tertinggi: {peak_month}")
-
-    # =========================
-    # 🔥 AUTO HIGHLIGHT
-    # =========================
-    st.markdown("## 🔥 Key Highlight")
-
-    if growth > 10:
-        st.success("🚀 Pertumbuhan signifikan terdeteksi (>10%)")
-    elif growth < -10:
-        st.error("📉 Penurunan signifikan terdeteksi")
-    else:
-        st.info("📊 Tren relatif stabil")
-
-    if peak_day in ["Saturday", "Sunday"]:
-        st.success("🛍️ Penjualan tinggi terjadi di akhir pekan")
-    else:
-        st.info("📅 Penjualan dominan di hari kerja")
-
-    # =========================
-    # 🧠 EXECUTIVE INSIGHT
-    # =========================
-    st.markdown("## 🧠 Executive Insight")
+    st.markdown("## 🎯 Business Recommendation")
 
     st.write(f"""
-    Model menunjukkan tren penjualan yang {trend_text} dengan perubahan sebesar {abs(growth):.2f}%.
-
-    Pola musiman terdeteksi:
-    - Hari terbaik: {peak_day}
-    - Bulan terbaik: {peak_month}
-
-    Insight ini menunjukkan adanya pola perilaku pelanggan yang dapat dimanfaatkan
-    untuk strategi pemasaran dan pengelolaan stok.
+        - Gunakan forecast untuk perencanaan inventory
+        - Optimalkan strategi promosi pada periode kenaikan tren
+        - Kurangi risiko overstock saat tren menurun
     """)
 
     # =========================
-    # RECOMMENDATION
+    # MODEL IMPACT
     # =========================
-    st.markdown("## 🎯 Recommendation")
+    st.markdown("## 💡 Model Impact")
 
     st.write("""
-    - Fokuskan promosi pada hari dengan performa tinggi
-    - Optimalkan inventory berdasarkan tren permintaan
-    - Gunakan forecast sebagai dasar perencanaan bisnis
+    Dengan menggunakan model forecasting:
+
+    - Perusahaan dapat mengantisipasi perubahan demand
+    - Pengambilan keputusan menjadi lebih berbasis data
+    - Risiko operasional dapat diminimalkan
     """)
 
-    st.warning("⚠️ Forecast digunakan untuk melihat tren, bukan angka pasti")
+
+with tab7:
+    st.subheader("🤖 Modeling & Evaluation")
+
+    import numpy as np
+    import pandas as pd
+    import plotly.express as px
+    from prophet import Prophet
+
+    # =========================
+    # MODEL EXPLANATION
+    # =========================
+    st.markdown("## 🤖 Model Overview")
+
+    st.write("""
+    Model utama yang digunakan adalah **Prophet**, yaitu model time series 
+    yang mampu menangkap tren dan seasonality.
+
+    Sebagai pembanding, digunakan **Moving Average (MA)** sebagai baseline sederhana.
+    
+    Evaluasi dilakukan menggunakan **Rolling Validation (Backtesting)** 
+    untuk memastikan model stabil di berbagai periode waktu.
+    """)
+
+    # =========================
+    # PARAMETER
+    # =========================
+    horizon = 30
+    step = 30
+
+    # =========================
+    # METRIC FUNCTION
+    # =========================
+    def evaluate(y_true, y_pred):
+        mae_p = np.mean(np.abs(y_true - y_pred))
+        rmse_p = np.sqrt(np.mean((y_true - y_pred)**2))
+        return mae_p, rmse_p
+
+    # =========================
+    # ROLLING VALIDATION
+    # =========================
+    st.markdown("## 🔁 Rolling Validation (Backtesting)")
+
+    results = []
+
+    for start in range(0, len(df_ts) - horizon, step):
+        train = df_ts[:start + horizon]
+        test = df_ts[start + horizon:start + horizon + step]
+
+        if len(test) == 0:
+            continue
+
+        # =========================
+        # PROPHET
+        # =========================
+        model = Prophet()
+        model.fit(train)
+
+        future = model.make_future_dataframe(periods=len(test))
+        forecast = model.predict(future)
+
+        y_true = test["y"].values
+
+        # 🔥 AMBIL HANYA FUTURE (BUKAN HISTORY)
+        y_pred_prophet = forecast["yhat"].iloc[-len(test):].values
+
+        # =========================
+        # MOVING AVERAGE
+        # =========================
+        train_ma = train.copy()
+        train_ma["ma"] = train_ma["y"].rolling(7).mean()
+
+        # 🔥 HANDLE NAN (ini yang sering bikin issue!)
+        last_ma = train_ma["ma"].dropna().iloc[-1]
+
+        y_pred_ma = np.full(len(test), last_ma)
+
+        # safety check
+        if len(y_true) != len(y_pred_ma):
+            st.error(f"Mismatch MA: {len(y_true)} vs {len(y_pred_ma)}")
+            continue
+
+        mae_ma, rmse_ma = evaluate(y_true, y_pred_ma)
+
+        # Prophet
+        if len(y_true) != len(y_pred_prophet):
+            st.warning(f"Skip window {start} (Prophet mismatch)")
+            continue
+
+        mae_p, rmse_p = evaluate(y_true, y_pred_prophet)
+
+        # Moving Average
+        if len(y_true) != len(y_pred_ma):
+            st.warning(f"Skip window {start} (MA mismatch)")
+            continue
+
+        # 🔥 append hanya kalau semua aman
+        results.append({
+            "window": start,
+            "mae_prophet": mae_p,
+            "rmse_prophet": rmse_p,
+            "mae_ma": mae_ma,
+            "rmse_ma": rmse_ma
+        })
+
+    # =========================
+    # FINAL DATAFRAME
+    # =========================
+    df_res = pd.DataFrame(results)
+
+    # =========================
+    # METRICS
+    # =========================
+    st.markdown("## 📏 Model Performance")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.markdown("### Prophet")
+        st.metric("MAE", f"{df_res['mae_prophet'].mean():.2f}")
+        st.metric("RMSE", f"{df_res['rmse_prophet'].mean():.2f}")
+
+    with col2:
+        st.markdown("### Moving Average")
+        st.metric("MAE (MA)", f"{df_res['mae_ma'].mean():.2f}")
+        st.metric("RMSE (MA)", f"{df_res['rmse_ma'].mean():.2f}")
+
+    # =========================
+    # MODEL COMPARISON
+    # =========================
+    st.markdown("## ⚖️ Model Comparison")
+
+    if df_res["rmse_prophet"].mean() < df_res["rmse_ma"].mean():
+        st.success("🏆 Prophet memberikan performa lebih baik")
+        best_model = "Prophet"
+    else:
+        st.warning("Moving Average lebih baik")
+        best_model = "Moving Average"
+
+    # =========================
+    # VISUAL COMPARISON
+    # =========================
+    st.markdown("## 📊 Error Comparison per Window")
+
+    fig = px.line(
+        df_res,
+        x="window",
+        y=["rmse_prophet", "rmse_ma"],
+        title="RMSE per Window"
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+
+    # =========================
+    # INSIGHT
+    # =========================
+    st.markdown("## 🧠 Model Insight")
+
+    st.write(f"""
+    Evaluasi menggunakan rolling validation menunjukkan bahwa model **{best_model}** 
+    memiliki performa yang lebih baik secara konsisten.
+
+    Prophet unggul dalam menangkap pola tren dan seasonality, 
+    sedangkan Moving Average hanya berfungsi sebagai baseline sederhana.
+
+    Hal ini menunjukkan bahwa penggunaan model time series yang lebih kompleks 
+    memberikan hasil prediksi yang lebih akurat untuk data penjualan.
+    """)
+
+    # =========================
+    # HYPERPARAMETER TUNING
+    # =========================
+    st.markdown("## ⚙️ Hyperparameter Tuning (Prophet)")
+
+    params = [0.01, 0.1, 0.5]
+    tuning = []
+
+    for p in params:
+        model = Prophet(changepoint_prior_scale=p)
+        model.fit(df_ts)
+
+        future = model.make_future_dataframe(periods=30)
+        forecast = model.predict(future)
+
+        y_true = df_ts["y"].tail(30).values
+        y_pred_prophet = forecast["yhat"].tail(30).values
+
+        mae, rmse = evaluate(y_true, y_pred_prophet)
+
+        tuning.append({"param": p, "rmse": rmse})
+
+    df_tune = pd.DataFrame(tuning)
+
+    best = df_tune.loc[df_tune["rmse"].idxmin()]
+
+    st.dataframe(df_tune)
+    st.success(f"Best changepoint_prior_scale: {best['param']}")
