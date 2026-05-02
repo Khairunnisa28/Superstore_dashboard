@@ -111,6 +111,15 @@ def narrative(df):
 # =========================
 # Modeling & Evaluation Function
 # =========================
+def build_prophet():
+    model = Prophet(
+        changepoint_prior_scale=0.05,
+        seasonality_prior_scale=10,
+        yearly_seasonality=True,
+        weekly_seasonality=True
+    )
+    model.add_seasonality(name='monthly', period=30.5, fourier_order=5)
+    return model
 
 def compute_best_model(df_ts, horizon=30, step=30):
 
@@ -127,7 +136,7 @@ def compute_best_model(df_ts, horizon=30, step=30):
             # =========================
             # PROPHET
             # =========================
-            model = Prophet()
+            model = build_prophet()
             model.fit(train)
 
             future = model.make_future_dataframe(periods=len(test))
@@ -191,12 +200,30 @@ def compute_best_model(df_ts, horizon=30, step=30):
 # =========================
 # GLOBAL COMPUTATION
 # =========================
-df_ts = df.groupby("order_date")["sales"].sum().reset_index()
+# =========================
+# GLOBAL COMPUTATION
+# =========================
 
-df_ts = df_ts.rename(columns={
-    "order_date": "ds",
-    "sales": "y"
-})
+# 🔹 DAILY (untuk EDA)
+df_ts_daily = (
+    df.groupby("order_date")["sales"]
+      .sum()
+      .reset_index()
+      .rename(columns={"order_date": "ds", "sales": "y"})
+)
+
+# 🔹 WEEKLY (untuk modeling & forecasting)
+df_ts_weekly = (
+    df.set_index("order_date")
+      .resample("W")["sales"]
+      .sum()
+      .reset_index()
+      .rename(columns={"order_date": "ds", "sales": "y"})
+)
+
+df_ts = df_ts_weekly
+
+df_ts["y"] = df_ts["y"].clip(lower=0)
 
 if "best_model" not in st.session_state:
     best_model, df_res = compute_best_model(df_ts)
@@ -315,7 +342,7 @@ with tab1:
 
     with col2:
         st.write("Setelah Agregasi (Daily)")
-        st.dataframe(df_ts.head())
+        st.dataframe(df_ts_daily.head())
 
     # =========================
     # DATA SIZE COMPARISON
@@ -324,7 +351,7 @@ with tab1:
 
     col1, col2 = st.columns(2)
     col1.metric("Data Awal", len(df))
-    col2.metric("Data Setelah Agregasi", len(df_ts))
+    col2.metric("Data Setelah Agregasi", len(df_ts_daily))
 
     # =========================
     # TRANSFORMATION INSIGHT
@@ -793,10 +820,7 @@ with tab6:
     # =========================
     # MODEL
     # =========================
-    model = Prophet(
-        yearly_seasonality=True,
-        weekly_seasonality=True
-    )
+    model = build_prophet()
     model.add_seasonality(name='monthly', period=30.5, fourier_order=5)
     model.fit(df_ts)
 
@@ -817,6 +841,11 @@ with tab6:
     fig_actual = px.line(actual, x="ds", y="y")
     st.plotly_chart(fig_actual, use_container_width=True)
 
+    st.caption(f"""
+    Grafik penjualan mingguan menunjukkan adanya tren peningkatan secara bertahap, yang mengindikasikan pertumbuhan bisnis dari waktu ke waktu. Dibandingkan dengan data harian, pola penjualan pada level mingguan terlihat lebih stabil dan mampu menggambarkan tren utama dengan lebih jelas.
+
+Meskipun masih terdapat fluktuasi pada beberapa periode, variasi tersebut mencerminkan dinamika permintaan yang wajar, sehingga data mingguan lebih representatif untuk digunakan dalam proses pemodelan dan forecasting.
+    """)
     # =========================
     # FORECAST
     # =========================
@@ -834,10 +863,53 @@ with tab6:
     trend_text = "meningkat" if growth > 0 else "menurun"
 
     st.caption(f"""
-    Prediksi menunjukkan tren {trend_text} sebesar {abs(growth):.2f}% 
-    dalam 3 bulan ke depan.
-    """)
+    Hasil forecasting menunjukkan adanya tren peningkatan penjualan dalam jangka pendek, disertai pola fluktuasi yang berulang. Pola ini mengindikasikan adanya seasonality yang kemungkinan dipengaruhi oleh perilaku pembelian atau aktivitas promosi.
 
+    Selain itu, nilai puncak penjualan yang semakin meningkat menunjukkan potensi pertumbuhan permintaan, sehingga perusahaan perlu mengantisipasi peningkatan kebutuhan inventory untuk menghindari risiko stockout.
+        """)
+
+    # =========================
+    # ACTUAL VS FORECAST
+    # =========================
+
+    df_actual = df_ts.copy()
+
+    df_forecast = forecast[["ds", "yhat"]]
+
+    df_compare = df_actual.merge(df_forecast, on="ds", how="left")
+
+    import plotly.graph_objects as go
+
+    fig = go.Figure()
+
+    # actual
+    fig.add_trace(go.Scatter(
+        x=df_compare["ds"],
+        y=df_compare["y"],
+        mode="lines",
+        name="Actual",
+        line=dict(width=3)
+    ))
+
+    # forecast
+    fig.add_trace(go.Scatter(
+        x=df_compare["ds"],
+        y=df_compare["yhat"],
+        mode="lines",
+        name="Forecast",
+        line=dict(dash="dash")
+    ))
+
+    fig.update_layout(
+        title="Actual vs Forecast (Weekly Sales)",
+        template="plotly_white"
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+    st.caption(f"""
+    Grafik menunjukkan perbandingan antara nilai aktual dan hasil prediksi penjualan mingguan. Secara umum, model mampu mengikuti pola tren penjualan dengan cukup baik, meskipun terdapat beberapa perbedaan pada periode tertentu. Hal ini menunjukkan bahwa model memiliki tingkat akurasi yang memadai dan dapat digunakan sebagai dasar dalam perencanaan bisnis jangka pendek.
+    """)
+    
     # =========================
     # AMBIL BEST MODEL
     # =========================
@@ -874,11 +946,6 @@ with tab6:
 
 with tab7:
     st.subheader("🤖 Modeling & Evaluation")
-
-    import numpy as np
-    import pandas as pd
-    import plotly.express as px
-    from prophet import Prophet
 
     # =========================
     # MODEL EXPLANATION
@@ -926,7 +993,7 @@ with tab7:
         # =========================
         # PROPHET
         # =========================
-        model = Prophet()
+        model = build_prophet()
         model.fit(train)
 
         future = model.make_future_dataframe(periods=len(test))
